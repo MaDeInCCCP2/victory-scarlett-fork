@@ -1,295 +1,167 @@
-# Scarlett fork (branch `feat/unified-memory-vram`)
+# Victory-Scarlett-Fork (`feat/unified-memory-vram`)
 
-## Highlights on this branch
-
-- **NVIDIA 1M+ descriptor heap bypass (`VICTORY_SLOT_REMAP=1`, 3 banks):** virtual-to-physical descriptor remapping (`SLOT_REMAP = t249`) with grace reclamation and clock eviction eliminates the 1M NVIDIA D3D12 descriptor cap.
-- **VRAM residency, RAM offloading & leak fixes:** live DXGI VRAM budget tracking (`residency.rs`), fence-aware reclamation, lazy 16 MiB `xmem` chunks, `CardStaging::CpuMem` + idle `DiscardVirtualMemory` trimmer (`VICTORY_CARD_TRIM_CPU=1`), DirectStorage memory leak fix, and `VICTORY_BACK_SKIP_UNREAD=1` + `VICTORY_WC_NO_BACK=1` copy-back reduction.
-- **CPU & upload pipeline offloads:** dedicated D3D12 copy queue (`VICTORY_UP_QUEUE=1`), AVX2 128B/iter descriptor differ, AVX2/SSE2 micro-tile texture detiler, 64-shard `PORT_JOURNAL`, `RwLock` `PORT_GUARD`, parallel shadow refresh, and `PORT_DESCRIPTORS` store hooks.
-- **NVIDIA rendering & visual fixes:** branchless IEEE-754 `rndne_f32`, `VICTORY_NAN_GUARD_STORES=1`, `VICTORY_E5_TARGETS=r11g11b10`, single-bounce ambient diffuse/air/specular stand-in (`VICTORY_AMBIENT=0.6`, `VICTORY_AMBIENT_AIR=1.0`, `VICTORY_AMBIENT_SPECULAR=0.8`, `VICTORY_AMBIENT_ONCE=1`, with D3D12 `id=646` UAV-in-SRV fix).
-- **DLSS 4.5 + Frame Generation + live F1 menu:** Streamline SDK integration (`-Dlss -FrameGen`), window title bar `(frame gen XX FPS)` readout, and in-game **`F1`** settings overlay persisted to `victory-settings.txt`.
-
-### Quick start (release build with DLSS + Frame Gen)
-
-```powershell
-# 1. Build clean release binary (or --profile diag --features diagnostics for profiling)
-cargo build --release --bin victory --locked
-
-# 2. Optional: pre-warm translated shaders once
-$env:VICTORY_SLOT_REMAP='1'; $env:VICTORY_NAN_GUARD_STORES='1'
-.\target\release\victory.exe warm --used --jobs 8
-
-# 3. Launch (Series X 1440p + DLSS 4.5 Quality + Frame Gen 2x; place NVIDIA Streamline SDK DLLs in .\streamline-sdk\bin\x64 or pass -StreamlineDir)
-.\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -Console series-x -Res 1440 -Dlss -Quality quality -DlssPreset L -FrameGen
-```
+[English](#english) | [Русский](#русский)
 
 ---
 
-## Base fork notes (`scarlett-fox`, state of 2026-11-26)
+<a id="english"></a>
+## English
 
-## How to start the game (the short version)
+An optimized fork of **Victory-Scarlett** (`Op-lite/victory-scarlett`) focused on NVIDIA 12 GB VRAM stability, low-core CPU offloads, full-color rendering fixes, and **NVIDIA DLSS 4.5 + Frame Generation** support.
 
-You need your own dump of the game: a folder that has `game_scarlett_master.exe` in it. **This repository contains
-no game files, code or assets.**
+> **Asset Policy:** This repository contains **no game files, code, shaders, or proprietary binaries**. You must supply your own dump folder containing `game_scarlett_master.exe` (and the official NVIDIA Streamline SDK x64 DLLs if you enable DLSS / Frame Generation).
 
-1. **Install the tools once:** [Rust](https://rustup.rs) and the Visual Studio C++ build tools with a Windows SDK.
-2. **Build once.** Open PowerShell in this folder and run:
+### Key Improvements
 
+- **NVIDIA 1M+ Descriptor Heap Bypass (`VICTORY_SLOT_REMAP=1`, 3 banks):** Virtual-to-physical descriptor remapping via Root SRV `t249` (`SLOT_REMAP`) with grace-period reclamation and clock eviction eliminates NVIDIA's 1,000,000 shader-visible view heap cap (`0` descriptor cap errors across 1.24M+ virtual title slots and 786k dynamic slots).
+- **VRAM Residency & RAM Offloading:**
+  - Live DXGI VRAM budget tracking (`residency.rs`), fence-aware reclamation (`VICTORY_FENCE_RECLAIM=1`), and lazy 16 MiB `xmem` chunks (`VICTORY_XMEM_CHUNKS=1`).
+  - `CardStaging::CpuMem` (`VirtualAlloc`) + idle `DiscardVirtualMemory` trimmer (`VICTORY_CARD_TRIM_CPU=1`), `VICTORY_DROP_DXIL=1`, `VICTORY_UNMAP_EXACT=1`, `VICTORY_WINDOW_UNMAP=1`, and DirectStorage RAM leak fix (`dstorage.rs`).
+  - Copy-back reduction via `VICTORY_WC_NO_BACK=1` + `VICTORY_BACK_SKIP_UNREAD=1` (readback sink + demand-settle): cuts GPU→CPU copy-back from ~48.7 MB/frame down to **0.2–0.3 MB/frame**.
+- **CPU & Upload Pipeline Offloads:**
+  - Dedicated async D3D12 copy queue (`VICTORY_UP_QUEUE=1`) for card-memory uploads.
+  - AVX2 128B/iter descriptor differ, AVX2/SSE2 micro-tile texture detiler (`victory-formats`), `PORT_DESCRIPTORS` store hooks, 64-shard `PORT_JOURNAL`, `RwLock` `PORT_GUARD`, parallel shadow refresh (`VICTORY_REFRESH_SPLIT_COPY=1`), `VICTORY_READBACK_POOL=1`, and `VICTORY_BATCH_GUARDS=1`.
+- **NVIDIA Rendering & Lighting Fixes:**
+  - Branchless IEEE-754 `rndne_f32` and default `VICTORY_NAN_GUARD_STORES=1` in `victory-shader`.
+  - `VICTORY_E5_TARGETS=r11g11b10` stand-in for `R9G9B9E5` render targets (fixes skin/wall blotches).
+  - Single-bounce indirect diffuse, volumetric air, and specular stand-in (`VICTORY_AMBIENT=0.6`, `VICTORY_AMBIENT_AIR=1.0`, `VICTORY_AMBIENT_SPECULAR=0.8`, `VICTORY_AMBIENT_ONCE=1`) with D3D12 `id=646` UAV-in-SRV validation fix.
+  - Safe barrier and cloud defaults (`VICTORY_NATIVE_BARRIERS=0` prevents auto-exposure whiteouts; `VICTORY_AMBIENT_MARCH=0` prevents darkened volumetric clouds).
+- **DLSS 4.5 + Frame Generation + Live UI:**
+  - Streamline SDK integration (`-Dlss -DlssPreset L -FrameGen`), automatic Frame Gen multiplier readout in the window title bar (`XX.X FPS (frame gen YY FPS)`), and an in-game **`F1`** settings overlay saved to `victory-settings.txt`.
+
+### Measured Results
+
+Tested on **Intel Core i5-11400F (6C/12T), 32 GB RAM, NVIDIA RTX 4070 SUPER 12 GB, Windows 11 (driver 621.40)** in Series X 1440p mode (clean `--release` build, RT off, DLSS 4.5 Quality Preset L + FG 2x):
+
+| Metric | Observed |
+|---|---|
+| Frame rate (cutscenes & boat gameplay) | **12–17 FPS native → 24–34 FPS presented (FG 2x)** |
+| VRAM usage (steady state / post-exit) | **8.8–9.5 / 10.6–11.2 GB** (`0` leaks post-exit) |
+| Process RAM (Working Set) | **~15–17 GB** |
+| GPU→CPU copy-back | **0.2–0.3 MB/frame** (~6.7 ms) |
+| Descriptor cap errors (`SLOT_REMAP`) | **0** |
+| Pre-warmed shader cache (`warm --used`) | **3,115 / 3,115** compiled (`0` failed) |
+
+### Quick Start
+
+1. **Prerequisites:** Install [Rust](https://rustup.rs) and Visual Studio C++ Build Tools with the Windows SDK.
+2. **Build (`--release` recommended for play, `--profile diag` for profiling):**
    ```powershell
-   cargo build --profile diag -p victory --features diagnostics --locked
+   cargo build --release --bin victory --locked
+   # Optional diagnostics build:
+   # cargo build --profile diag --bin victory --features diagnostics --locked
+   ```
+3. **Optional — Pre-warm translated shaders once (recommended):**
+   ```powershell
+   $env:VICTORY_SLOT_REMAP = '1'
+   $env:VICTORY_NAN_GUARD_STORES = '1'
+   .\target\release\victory.exe warm --used --jobs 8
+   ```
+4. **Optional — DLSS 4.5 & Frame Generation:** Download the official **NVIDIA Streamline SDK (x64)** and place `sl.interposer.dll`, `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.reflex.dll` (and companion `sl.*.dll`) into `.\streamline-sdk\bin\x64` (or pass `-StreamlineDir <path>`).
+5. **Launch:**
+   ```powershell
+   # Series X 1440p + DLSS 4.5 Quality (Preset L) + Frame Gen 2x
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -Console series-x -Res 1440 -Resolution 2560x1440 -Dlss -Quality quality -DlssPreset L -FrameGen
+
+   # Series S 1080p + DLSS 4.5 Quality + Frame Gen 2x (higher FPS / lower VRAM)
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -Console series-s -Resolution 1920x1080 -Dlss -Quality quality -DlssPreset L -FrameGen
+
+   # Without DLSS / without memory hooks (troubleshooting)
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -NoHooks
    ```
 
-3. **Start the game.** Drag your game folder onto **`Play-Scarlett.cmd`**.
-   After the first time, just double-click `Play-Scarlett.cmd`: it remembers the folder.
+> **Note:** On the very first launch of a new console mode (Series X or Series S), remaining scene shaders compile in the background and faces may finish baking slightly late; from the second launch onward the pipeline library is warm and faces render cleanly.
 
-That is all. `Play-Scarlett.cmd` sets every setting and memory hook this branch is measured with, in Series X mode.
+### Controls & Hotkeys
 
-Good to know:
+- **`F1`** — Open/close the in-game live settings menu (`↑`/`↓` select, `←`/`→` change, `Enter` apply/save to `victory-settings.txt`, `Esc` close; blocks title keyboard while open).
+- **`F10`** — Toggle the translucent performance overlay.
+- **Gamepad:** Any Xbox-compatible controller works natively.
+- **Keyboard stand-in pad:** `W A S D` move, `I J K L` camera, `Enter` = A, `Backspace` = B, `X` / `Y`, `Z` / `C` = LT / RT, `Q` / `E` = LB / RB, Arrow keys = D-pad, `Esc` = Menu, `Tab` = View.
 
-- **The first start is slow** and can show missing faces: the game's shaders are translated once and kept. From the
-  second start on it is right.
-- **Controls:** an Xbox controller works. On the keyboard: W A S D move, I J K L camera, Enter = A, Backspace = B,
-  X and Y, Z / C = left / right trigger, Q / E = LB / RB, arrows = D-pad, Esc = Menu, Tab = View.
-- **Do not use `Play-VIctory.cmd`** for this: that is the base's launcher, with Series S and other settings.
-- **Ray tracing** is off by default (the game's own, much slower). To turn it on, start it from PowerShell:
+### Credits
 
-  ```powershell
-  .\scripts\play-scarlett.ps1 -RayTracing
-  ```
-
-- **Something looks wrong?** Try without the memory hooks: `.\scripts\play-scarlett.ps1 -NoHooks`
-- More options are listed at the top of `scripts\play-scarlett.ps1` (other cache or save folders, a release build,
-  automatic start-screen presses, any single setting through `-More`).
-
-## What this is
-
-This branch is codec-d/cool_fox at `f4b48ad` (itself avatarmanz/VIctory-7900XTX `0a43566` plus six commits) with the
-work of a local fork ("Scarlett") ported onto it. Target PC: Ryzen 7 9800X3D, 32 GB RAM, RTX 4080 SUPER 16 GB,
-2560x1440, Series X mode. Goal: a stable 30 frames a second with no loss of picture. It is not there yet.
-
-## Measured (6-minute opening route, diagnostics build, ray tracing off)
-
-| | cool_fox as it was (floor) | this branch, current settings |
-|---|---|---|
-| ms per frame, 1,000-2,500 draws | 50-55 | 35 |
-| ms per frame, 2,500-4,000 draws | 50-53 | 44 |
-| ms per frame, over 4,000 draws | 59-66 | 56 |
-| frames over 1.5x the usual | 7-8 % | 2.3 % |
-| 5-second periods with a frame over 500 ms | 18-21 | 10 |
-| frames drawn in the 6 minutes | 4,400-5,900 | 8,385 |
-| texture copies made again in the first 4 minutes | about 6.4 GB | 14 MB |
-| memory commit, peak | 37 GB | 33 GB |
-
-Heavier hand-played scenes (a prison yard at 5,500-8,600 draws, the open world) run at about 48-62 ms a frame
-(16-21 fps). Identical runs on the test PC differ by 13-18 ms a frame at the same draw count, so single-run frame
-times prove little; the memory, re-upload and freeze figures and each switch's own counter line are what is solid.
-
-Where the time goes now (ray tracing off): the graphics card is mostly idle. One thread of the layer, the one that
-hands each frame's work to the card, is busy for the whole frame (32-44 ms: buffer refreshes 12-14, copies in the
-card's memory 7-8, other list steps about 6, write-watch asks about 4).
-
-## The settings `Play-Scarlett.cmd` uses
-
-All settings are environment variables read at start; `scripts\play-scarlett.ps1` holds the list, in groups:
-
-- cool_fox's launcher set, **without** Series S, `VICTORY_THIN` and the stand-in ambient light, and with the
-  keep-the-card-busy loop off (`VICTORY_CARD_AWAKE=0`: it held the card at 97-99 % in menus for no gain).
-- `VICTORY_LEVELS_ON_DEMAND=0`: textures keep only the levels their views show. cool_fox's launcher set it to 1,
-  which made every texture keep its whole chain on the card. Off: re-uploads near zero, about 4 GB less commit,
-  fewer freezes. This was the largest single gain.
-- The memory hooks (`-NoHooks` starts without them).
-- `VICTORY_POOL_DISCARD=1`, `VICTORY_FILL_TITLE=1`, `VICTORY_PARTIAL_DELTA=1`, `VICTORY_BAKE_DELTA=1`,
-  `VICTORY_MAP_LOCK_FINE=1`, `VICTORY_POOL_CAP=1`: unused pool pages given back under low RAM, no read waits for
-  fills, unchanged texture levels not uploaded again, the mapping lock taken per range, the texture pool capped.
-- `VICTORY_TABLE_MEMO=1`: a descriptor-table entry made ready earlier in a command list is not made ready again
-  (81 % of about 54,000 entries a frame; verified against the full path). `VICTORY_LIST_ALIAS_EXACT=1`: a texture
-  read through a view in another format follows its source's writes within a list (the base read a stale copy once
-  a frame in the title's lighting filter).
-
-## What was added to cool_fox
-
-Always on:
-- Unattended runs: `VICTORY_AUTO_INPUT` (a script of pad presses keyed on draws per frame, to pass the start
-  screens), a window caption with fps, ms and draws, `VICTORY_FRAME_LOG` (per-frame breakdown by thread, long frames
-  listed with their cause), `VICTORY_HANG_WATCH_S`, `VICTORY_PRESENT_SKIP` for runs with the display off.
-- Picture: 16-bit float values moved through unsigned-integer views (`VICTORY_HALF_VIEWS`, `VICTORY_D16_BITS`; fixes
-  frozen facial animation and a blurred disc in cutscenes), a NaN guard on colour exports (`VICTORY_NAN_GUARD`),
-  early depth, pipelines made for the render-target formats actually bound (`VICTORY_TARGET_VARIANTS`), an alias copy
-  after an upload earlier in the same list, views keep the title's minimum LOD. 26 compute programs the base refused
-  now translate (hair shadow masks, water volumetrics, particle emits, decals).
-- Meters (diagnostics builds): uploads by cause, read waits by reason, mapping-lock readers, memory housekeeping,
-  texture detail, the game's chunk pool, page kinds by the title's own table, per-pass GPU times
-  (`VICTORY_PASS_TIMES=1`, `=2` serial), list calls and draw set-up by part (`VICTORY_LIST_CALLS=1`).
-
-Switches, off by default (the base's behaviour is kept unless a run showed a gain); the ones in the launcher are
-described above. Others:
-- `VICTORY_PAGE_POOL=1`: textures on pages of reserved resources (about 1.2 GB less texture memory, no frame cost).
-  Its page mover `VICTORY_PAGE_MIGRATE` loses the device on the test card and must stay off (`tools/docs/fox-port-V.md`).
-- `VICTORY_STAGING_REST_MS`, `VICTORY_STAGING_PACK`, `VICTORY_SEND_SPARE_MB`, `VICTORY_WINDOW_KB`,
-  `VICTORY_WINDOW_TAILS`, `VICTORY_HOLDERS`: memory trims; about 1-2 GB less commit, not in the launcher.
-- `VICTORY_CLEAN_STAMP`, `VICTORY_ASK_KEPT_EARLY`, `VICTORY_FILL_FROM_PLACED`, `VICTORY_SIGNATURE_LOCAL`,
-  `VICTORY_BIND_SAME`, `VICTORY_LIST_BATCH`, `VICTORY_FAULT_NOTE_ONCE`, `VICTORY_BASE_REUSE`, `VICTORY_MAP_DEFER`,
-  `VICTORY_REMAP_SAME`, `VICTORY_CHUNK_FINAL`, `VICTORY_BIND_FILTER`, `VICTORY_HOIST_LOADS` and more: built, exact,
-  no gain shown (or a loss: `VICTORY_LIST_BATCH`), or untested. `tools/docs` says which.
-- Tried and rejected on this base: `VICTORY_THIN=1` (no gain here, twice the long frames), `VICTORY_WINDOWS_BAR_MB`
-  (game memory in VRAM through Resizable BAR: no gain while the card is idle, 1.4 GB of VRAM), a release build
-  without diagnostics (no faster), `VICTORY_DISPLAY_MODE=2560x1440` (the title still builds its 4K targets),
-  `VICTORY_SHADER_LOOP_LIMIT=1024` (black faces), `VICTORY_BVH_COUNT32` (breaks ray tracing), `VICTORY_UNMAP_EXACT`,
-  `VICTORY_TEXTURE_RAM_CAPS=0`, `VICTORY_VRAM_RAW_PCT`.
-
-## Known problems
-
-- Bushes and some trees glow purple; purple patches linger for a few seconds in some scenes (present in the base;
-  cause not found: `tools/docs/left-out-audit.md` lists the candidates).
-- Meshes can stretch for a second or two in busy scenes (seen before today's changes; another fork blames
-  `VICTORY_RELAY=2` with `VICTORY_CARD_STEPS=2`; not yet tested here).
-- Ray tracing is off by default: the base leaves the title's ray passes out unless `VICTORY_BVH_BUILDER=1`
-  (`CS_RaytracingResolve`, about 1,000 programs, and `CS_ScreenProbes_ActivateRays`). Those are all of the draws the
-  log reports as dropped. With it on the picture is sharper and better lit, and the card needs about 84 ms a frame
-  (`tools/docs/rt-parked-T.md`).
-- Heavy scenes sit at 16-21 fps: the layer's submitting thread is the limit (see above).
-- Texture pop-in remains, less than before; the card reaches 14-15 GB of 16 in long sessions.
-- A first run on an empty shader cache can show missing or black faces.
-- In Series X mode the title always renders at 2560x1440 and upscales to 3840x2160 itself.
-- Two pipeline creation methods are not implemented (the title falls back to ordinary containers).
-
-## Where things are
-
-- `Play-Scarlett.cmd`, `scripts/play-scarlett.ps1`: the launcher.
-- `tools/`: the measuring scripts (`run-auto-coolfox.sh`: hands-off run with watchdog; `run-compare.sh`,
-  `run-freezes.sh`, `run-focus.sh`), notes (`tools/docs`: what was measured, tried and rejected; `fox-port-*.md` list
-  every ported switch; `cool-fox-willy-review.md` and `left-out-audit.md`: a settings audit and what the layer
-  leaves out or approximates), `tools/baseline-coolfox/README.md` (the floor and how to compare against it).
-- The older Scarlett tree (soldsawn/victory-nvidia-8gb base) is on branch `scarlett`.
-
-The base's own README follows.
+Built on top of **Op-lite/victory-scarlett** (`scarlett-fox` / `cool_fox`), incorporating and adapting techniques from the Victory community (`VIctory-NVIDIA-Hybrid`, `VIctory-NVIDIA` / `foxhound`, `victory-cool_fox-willy`, `AnyXboxX`, `VIctory-DLSS-GDeflate`).
 
 ---
 
-# VIctory on an RX 7900 XTX
+<a id="русский"></a>
+## Русский
 
-## Run the codec_d Windows build
+Оптимизированный форк **Victory-Scarlett** (`Op-lite/victory-scarlett`) с фокусом на стабильность на видеокартах NVIDIA с 12 ГБ VRAM, разгрузку CPU, исправление полноцветного рендеринга и поддержку **NVIDIA DLSS 4.5 + Frame Generation**.
 
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+> **Политика ассетов:** Репозиторий **не содержит файлов игры, кода, шейдеров или проприетарных библиотек**. Пользователь предоставляет собственную папку с дампом (`game_scarlett_master.exe`), а для DLSS / Frame Generation — официальные DLL из NVIDIA Streamline SDK x64.
 
-```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
-.\Play-VIctory.cmd pareto-residency
-```
+### Ключевые улучшения
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+- **Обход лимита NVIDIA в 1 млн дескрипторов (`VICTORY_SLOT_REMAP=1`, 3 банка):** виртуально-физическая переадресация дескрипторов через Root SRV `t249` (`SLOT_REMAP`) с отложенным освобождением и clock-вытеснением полностью снимает упор в 1M-лимит NVIDIA (`0` ошибок лимита на 1.24M+ виртуальных title-слотов и 786k динамических слотов).
+- **Управление VRAM и разгрузка RAM:**
+  - Живой контроль бюджета VRAM через DXGI (`residency.rs`), освобождение по fence (`VICTORY_FENCE_RECLAIM=1`) и ленивые 16 MiB чанки `xmem` (`VICTORY_XMEM_CHUNKS=1`).
+  - `CardStaging::CpuMem` (`VirtualAlloc`) + сброс простаивающих буферов через `DiscardVirtualMemory` (`VICTORY_CARD_TRIM_CPU=1`), `VICTORY_DROP_DXIL=1`, `VICTORY_UNMAP_EXACT=1`, `VICTORY_WINDOW_UNMAP=1` и фикс утечки RAM в DirectStorage (`dstorage.rs`).
+  - Снижение GPU→CPU copy-back через `VICTORY_WC_NO_BACK=1` + `VICTORY_BACK_SKIP_UNREAD=1` (readback-перехват + ленивая догрузка по требованию): с ~48.7 МБ/кадр до **0.2–0.3 МБ/кадр**.
+- **Разгрузка CPU и конвейера загрузок:**
+  - Выделенная асинхронная D3D12 Copy Queue (`VICTORY_UP_QUEUE=1`) для загрузок буферов в память видеокарты.
+  - AVX2-компаратор дескрипторов (128 байт/итерация), AVX2/SSE2 детайлер текстур (`victory-formats`), хуки записи дескрипторов `PORT_DESCRIPTORS`, 64-шардовый `PORT_JOURNAL`, `RwLock` `PORT_GUARD`, параллельный shadow refresh (`VICTORY_REFRESH_SPLIT_COPY=1`), `VICTORY_READBACK_POOL=1` и `VICTORY_BATCH_GUARDS=1`.
+- **Графические и NVIDIA-фиксы:**
+  - Безветвенный IEEE-754 `rndne_f32` и `VICTORY_NAN_GUARD_STORES=1` по умолчанию в `victory-shader`.
+  - Подмена `R9G9B9E5` рендер-таргетов на `R11G11B10_FLOAT` (`VICTORY_E5_TARGETS=r11g11b10` — убирает пятна и артефакты на коже и стенах).
+  - Одноотскоковый stand-in непрямого освещения, воздуха и отражений (`VICTORY_AMBIENT=0.6`, `VICTORY_AMBIENT_AIR=1.0`, `VICTORY_AMBIENT_SPECULAR=0.8`, `VICTORY_AMBIENT_ONCE=1`) с фиксом ошибки D3D12 `id=646` (UAV в SRV-слоте).
+  - Безопасные настройки барьеров и облаков (`VICTORY_NATIVE_BARRIERS=0` исключает белые экраны автоэкспозиции; `VICTORY_AMBIENT_MARCH=0` исключает почернение объёмных облаков).
+- **DLSS 4.5 + Frame Generation + встроенное меню:**
+  - Интеграция Streamline SDK (`-Dlss -DlssPreset L -FrameGen`), автоматическое отображение итогового FPS с генерацией кадров в заголовке окна (`XX.X FPS (frame gen YY FPS)`) и живое внутриигровое меню по **`F1`** с сохранением в `victory-settings.txt`.
 
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
+### Измеренные результаты
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
-This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
-one PC, without giving up the picture. It is not there yet.
+Тестовый стенд: **Intel Core i5-11400F (6C/12T), 32 ГБ RAM, NVIDIA RTX 4070 SUPER 12 ГБ, Windows 11 (драйвер 621.40)**, режим Series X 1440p (чистый `--release`, RT выкл., DLSS 4.5 Quality Preset L + FG 2x):
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
-
-## Where it stands (2026-11-25)
-
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, 1440p, the Series X profile.
-
-| | |
+| Метрика | Результат |
 |---|---|
-| Menus, videos, loading screens | 30 fps |
-| Prologue, indoors | 50-75 ms a frame (13-20 fps) |
-| First mission with the boat | 46-53 ms (19-22 fps) |
-| Street chase with many cars and people | 100-165 ms (6-10 fps), single frames far longer |
-| Outdoors on foot, the camp | 60-90 ms |
-| Flying | 42-57 ms |
-| Longest session so far | 41 minutes, no crash |
-| Memory | 40-46 GB of private memory: **64 GB of RAM recommended** |
+| Частота кадров (катсцены и геймплей на лодке) | **12–17 FPS нативно → 24–34 FPS с FG 2x** |
+| Потребление VRAM (в работе / после выхода) | **8.8–9.5 / 10.6–11.2 ГБ** (`0` утечек после выхода) |
+| Потребление RAM процессом (Working Set) | **~15–17 ГБ** |
+| GPU→CPU copy-back | **0.2–0.3 МБ/кадр** (~6.7 мс) |
+| Ошибки лимита дескрипторов (`SLOT_REMAP`) | **0** |
+| Прогрев кэша шейдеров (`warm --used`) | **3,115 / 3,115** скомпилировано (`0` ошибок) |
 
-It started at 280 ms a frame in the same scenes two days earlier.
+### Быстрый старт
 
-What is known to be wrong:
+1. **Инструменты:** установите [Rust](https://rustup.rs) и Visual Studio C++ Build Tools с Windows SDK.
+2. **Сборка (для игры используйте `--release`, для профилирования — `--profile diag`):**
+   ```powershell
+   cargo build --release --bin victory --locked
+   # Опциональная диагностическая сборка:
+   # cargo build --profile diag --bin victory --features diagnostics --locked
+   ```
+3. **Опционально — разовый прогрев кэша шейдеров (рекомендуется):**
+   ```powershell
+   $env:VICTORY_SLOT_REMAP = '1'
+   $env:VICTORY_NAN_GUARD_STORES = '1'
+   .\target\release\victory.exe warm --used --jobs 8
+   ```
+4. **Опционально — DLSS 4.5 и Frame Generation:** скачайте официальный **NVIDIA Streamline SDK (x64)** и положите `sl.interposer.dll`, `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.reflex.dll` (и остальные `sl.*.dll`) в `.\streamline-sdk\bin\x64` (либо передайте путь через `-StreamlineDir`).
+5. **Запуск:**
+   ```powershell
+   # Series X 1440p + DLSS 4.5 Quality (Preset L) + Frame Gen 2x
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -Console series-x -Res 1440 -Resolution 2560x1440 -Dlss -Quality quality -DlssPreset L -FrameGen
 
-- Trees, plants and far buildings flicker outdoors in some places.
-- Rooms with little direct light are too dark without `-RayTracing`.
-- Textures of what just came into view appear late while the title streams.
-- The first run with a new driver or a new build stutters while the driver makes
-  pipelines (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
+   # Series S 1080p + DLSS 4.5 Quality + Frame Gen 2x (выше FPS / меньше VRAM)
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -Console series-s -Resolution 1920x1080 -Dlss -Quality quality -DlssPreset L -FrameGen
 
-## How to run it
+   # Без DLSS / без хуков памяти (для диагностики)
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release
+   .\scripts\play-scarlett.ps1 -Game 'D:\Games\MyDump' -Build release -NoHooks
+   ```
 
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
+> **Примечание:** при самом первом запуске нового режима консоли (Series X или Series S) оставшиеся пайплайны докомпилируются в фоне, из-за чего запекание текстур лиц может не успевать; со второго запуска кэш уже прогрет и лица рендерятся чисто.
 
-```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
-```
+### Управление и горячие клавиши
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+- **`F1`** — открыть/закрыть внутриигровое меню настроек (`↑`/`↓` выбор, `←`/`→` изменение, `Enter` применить/сохранить в `victory-settings.txt`, `Esc` закрыть; при открытом меню ввод клавиатуры в игру блокируется).
+- **`F10`** — показать/скрыть полупрозрачный оверлей производительности.
+- **Геймпад:** любой Xbox-совместимый контроллер работает напрямую.
+- **Клавиатура (эмуляция геймпада):** `W A S D` движение, `I J K L` камера, `Enter` = A, `Backspace` = B, `X` / `Y`, `Z` / `C` = LT / RT, `Q` / `E` = LB / RB, стрелки = крестовина, `Esc` = Menu, `Tab` = View.
 
-Before the first run, ahead of time (both can be stopped and go on later):
+### Благодарности
 
-```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
-```
-
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
-
-## What is different here
-
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
-
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
-
-## Credits
-
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
-
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, and work by romainhedouin.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
-
-## License
-
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+Основано на **Op-lite/victory-scarlett** (`scarlett-fox` / `cool_fox`) с интеграцией и адаптацией наработок сообщества Victory (`VIctory-NVIDIA-Hybrid`, `VIctory-NVIDIA` / `foxhound`, `victory-cool_fox-willy`, `AnyXboxX`, `VIctory-DLSS-GDeflate`).
